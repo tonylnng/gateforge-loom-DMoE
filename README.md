@@ -641,7 +641,9 @@ free -h                                # unified-memory headroom (GB10)
 ### References
 
 - DMoE paper — *Decoupled Mixture-of-Experts for Parametric Knowledge Injection*
-  ([arXiv:2606.14243](https://arxiv.org/abs/2606.14243))
+  ([arXiv:2606.14243](https://arxiv.org/abs/2606.14243)) ·
+  local copy: [`docs/references/DMoE-2606.14243v1.pdf`](docs/references/DMoE-2606.14243v1.pdf) ·
+  notes: [`docs/references/`](docs/references/README.md)
 - NVIDIA DGX Spark / GB10 hardware
   ([NVIDIA docs](https://docs.nvidia.com/dgx/dgx-spark/hardware.html))
 - GB10 PyTorch/SM121 setup notes
