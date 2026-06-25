@@ -1,0 +1,143 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# GateForge-Loom-DMoE — single-box DGX (GB10 / Grace-Blackwell, ARM64 + CUDA)
+#
+# Everything runs as containers on ONE DGX OS host, on one Docker network,
+# sharing the single GB10 GPU via the NVIDIA Container Toolkit. `hermes-dmoe`
+# runs the paper's true parametric DMoE and claims the GB10 GPU.
+#
+# NOTE: images below are placeholders for your own service builds. The two GPU
+# image tags use NVIDIA NGC ARM64/SM121 bases that work on GB10.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: loom-dmoe
+
+x-internal-auth: &internal-auth
+  INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+networks:
+  loom-net:
+    driver: bridge
+
+volumes:
+  pgdata:          # Postgres + pgvector long-term memory
+  redisdata:       # Redis state bus (AOF)
+  n8ndata:         # n8n workflows + credentials
+  expertbank:      # hermes-dmoe LoRA Δθ + source text + BM25 index
+  hfcache:         # Hugging Face model cache (local mode base model)
+
+services:
+  # ===== Orchestrator =======================================================
+  n8n:
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    environment:
+      <<: *internal-auth
+      N8N_BASIC_AUTH_ACTIVE: ${N8N_BASIC_AUTH_ACTIVE:-true}
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
+      N8N_HOST: ${N8N_HOST}
+      N8N_PROTOCOL: ${N8N_PROTOCOL:-https}
+      WEBHOOK_URL: ${WEBHOOK_URL}
+      QUEUE_BULL_REDIS_HOST: redis
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8ndata:/home/node/.n8n
+    networks: [loom-net]
+    depends_on: [redis]
+
+  # ===== State bus ==========================================================
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    networks: [loom-net]
+
+  # ===== Brain (claude-gateway) =============================================
+  claude-gateway:
+    build: ./services/claude-gateway      # replace with your image/build
+    image: loom/claude-gateway:latest
+    restart: unless-stopped
+    environment:
+      <<: *internal-auth
+      AI_GATEWAY_BASE_URL: ${AI_GATEWAY_BASE_URL}
+      AI_GATEWAY_API_KEY: ${AI_GATEWAY_API_KEY}
+      BRAIN_MODEL: ${BRAIN_MODEL:-claude-opus-4}
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8001:8000"
+    networks: [loom-net]
+    depends_on: [redis]
+
+  # ===== Hands (openclaw) ===================================================
+  openclaw:
+    build: ./services/openclaw
+    image: loom/openclaw:latest
+    restart: unless-stopped
+    environment:
+      <<: *internal-auth
+    ports:
+      - "8002:8000"
+    networks: [loom-net]
+
+  # ===== Memory (hermes) ====================================================
+  hermes:
+    build: ./services/hermes
+    image: loom/hermes:latest
+    restart: unless-stopped
+    environment:
+      <<: *internal-auth
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    ports:
+      - "8003:8000"
+    networks: [loom-net]
+    depends_on: [postgres]
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks: [loom-net]
+
+  # ===== Knowledge (hermes-dmoe) — true parametric DMoE, claims the GB10 GPU ==
+  hermes-dmoe:
+    build:
+      context: ./services/hermes-dmoe
+      # Use the NGC pytorch:25.10-py3+ ARM64/SM121 base for GB10.
+      dockerfile: Dockerfile
+    image: loom/hermes-dmoe:latest
+    restart: unless-stopped
+    environment:
+      <<: *internal-auth
+      STUB_MODE: ${STUB_MODE:-1}
+      EXPERT_BANK_DIR: ${EXPERT_BANK_DIR:-/data/experts}
+      TOP_K: ${TOP_K:-3}
+      BASE_MODEL: ${BASE_MODEL:-meta-llama/Llama-3.2-1B-Instruct}
+      TU_THRESHOLD: ${TU_THRESHOLD:-2.0}
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_HOME: /hf-cache
+    ports:
+      - "8004:8000"
+    volumes:
+      - expertbank:/data/experts
+      - hfcache:/hf-cache
+    networks: [loom-net]
+    depends_on: [hermes]
+    # GPU reservation — GB10 / Grace-Blackwell.
+    # On GB10 use the device-reservation form (NOT `runtime: nvidia`).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, compute, utility]

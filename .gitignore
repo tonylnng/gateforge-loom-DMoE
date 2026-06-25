@@ -1,0 +1,13 @@
+# Secrets & local config
+.env
+*.env.local
+
+# Backups & data
+backups/
+experts/
+*.tar.gz
+*.sql.bak
+
+# OS / editor
+.DS_Store
+*.swp
